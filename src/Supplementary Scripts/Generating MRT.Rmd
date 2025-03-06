@@ -1,0 +1,109 @@
+---
+title: "Generating MRT"
+author: "Phua Zhuo Wei"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tinytex)
+library(tidyverse)
+library(corrplot) # for correlation matrix 
+library(magrittr)
+library(gridExtra) 
+library(ggpubr)
+library(VGAM)
+library(data.table)
+library(progress)
+library(sf)
+library(geosphere)
+library(zoo)
+options(scipen=999)
+```
+
+# Importing Coordinates
+```{r}
+df <- read.csv('/Users/zhuowei/Downloads/data (2).csv', stringsAsFactors = T)
+
+# convert month column to date type
+df$month <- as.character(df$month)
+
+# Asumming all entries are done on the 1st of each month
+df$month <- paste0(df$month, "-01")
+# Quantifying remaining lease as numerical terms
+df$remaining_lease <- as.character(df$remaining_lease)
+df <- df %>%
+  mutate(
+    years = as.numeric(str_extract(remaining_lease, "\\d+(?= years)")),  # Extract the years
+    months = as.numeric(str_extract(remaining_lease, "(?<=years )\\d+")),  # Extract the months
+    months = ifelse(is.na(months), 0, months),
+    remaining_lease = years + (months / 12)  # Convert to decimal
+  ) %>%
+  select(-years, -months)
+
+sum(is.na(df))
+sum(duplicated(df))
+nrow(df)
+df <- unique(df)
+```
+
+# MRT Coordinates
+```{r}
+# download SHP file from `https://datamall.lta.gov.sg/content/datamall/en/static-data.html` -> change accordingly if new stations are built
+
+shapefile_path <- "/Users/zhuowei/Downloads/TrainStation_Nov2024/RapidTransitSystemStation.shp"
+
+mrt_stations <- st_read(shapefile_path)
+mrt_stations <- mrt_stations[-167, ] # not a MRT Station
+
+# print(st_crs(mrt_stations))
+# SG format uses SVY21 Coordinate reference system 
+
+mrt_df <- data.frame(
+  station = character(nrow(mrt_stations)),
+  longitude = numeric(nrow(mrt_stations)),
+  latitude = numeric(nrow(mrt_stations)))
+
+#Fixing the Centroid stuff:
+# Filter out invalid geometries
+mrt_stations <- mrt_stations[st_is_valid(mrt_stations$geometry), ]
+# Calculate centroids after filtering
+centroids <- st_centroid(mrt_stations$geometry)
+centroids_wgs84 <- st_transform(centroids, crs = 4326)
+coordinates <- st_coordinates(centroids_wgs84)
+
+# Store into mrt_df
+mrt_df <- data.frame(
+  station = mrt_stations$STN_NAM_DE,
+  type = mrt_stations$TYP_CD_DES,
+  longitude = coordinates[, 1], 
+  latitude = coordinates[, 2],  
+  stringsAsFactors = TRUE
+)
+mrt_df <- na.omit(mrt_df)
+head(mrt_df)
+```
+
+# Calculating Nearest MRT and distance from MRT
+
+```{r}
+df$nearest_mrt <- NA
+df$distance_to_mrt <- NA
+
+dist_matrix <- distm(df[, c("longitude", "latitude")], mrt_df[, c("longitude", "latitude")], fun = distHaversine)
+
+# Finding the nearest MRT station and its distance for each location
+nearest_mrt_indices <- apply(dist_matrix, 1, which.min)
+nearest_mrt_distances <- apply(dist_matrix, 1, min)
+
+df$nearest_mrt <- mrt_df$station[nearest_mrt_indices]
+df$distance_to_mrt <- nearest_mrt_distances
+df$mrt_type <- mrt_df$type[nearest_mrt_indices]
+```
+
+# Saving Data
+```{r}
+write.csv(df, "test_mrt.csv", row.names = FALSE)
+```
+
